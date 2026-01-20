@@ -14,6 +14,7 @@ import kotlin.math.log2
 class BehaviorDetectionEngine(private val context: Context) {
     
     private val mlClassifier = RansomwareClassifier(context)
+    private val trustedAppChecker = TrustedAppChecker(context)
     
     data class DetectionResult(
         val suspicious: Boolean,
@@ -54,47 +55,54 @@ class BehaviorDetectionEngine(private val context: Context) {
         val indicators = mutableListOf<String>()
         var confidence = 0.0f
         
-        // Pattern 1: Rapid mass file modifications
+        val currentTime = System.currentTimeMillis()
+        val timeWindowStart = currentTime - timeWindowMs
+        
+        // Pattern 1: Rapid mass file modifications (INCREASED THRESHOLD)
         val recentModifications = recentEvents.filter { 
             it.eventType == EventType.MODIFIED && 
-            System.currentTimeMillis() - it.timestamp < timeWindowMs 
+            it.timestamp >= timeWindowStart
         }
-        if (recentModifications.size > 50) {
+        // Increased threshold from 50 to 100 files per minute (more realistic)
+        if (recentModifications.size > 100) {
             indicators.add("Mass file modifications detected (${recentModifications.size} files in 1 minute)")
-            confidence += 0.3f
-        }
-        
-        // Pattern 2: Extension changes (e.g., .doc -> .locked)
-        val extensionChanges = detectExtensionChanges(recentEvents)
-        if (extensionChanges > 10) {
-            indicators.add("Suspicious extension changes detected ($extensionChanges files)")
             confidence += 0.4f
         }
         
-        // Pattern 3: High entropy in modified files (encryption indicator)
-        val highEntropyFiles = recentModifications.filter { 
-            it.entropy != null && it.entropy > 7.5 
-        }
-        if (highEntropyFiles.size > 20) {
-            indicators.add("High entropy detected in ${highEntropyFiles.size} files (possible encryption)")
+        // Pattern 2: Extension changes (e.g., .doc -> .locked) (INCREASED THRESHOLD)
+        val extensionChanges = detectExtensionChanges(recentEvents.filter { it.timestamp >= timeWindowStart })
+        // Increased threshold from 10 to 20 extension changes
+        if (extensionChanges > 20) {
+            indicators.add("Suspicious extension changes detected ($extensionChanges files)")
             confidence += 0.5f
         }
         
-        // Pattern 4: Rapid file creation followed by modification
-        val createModifyPattern = detectCreateModifyPattern(recentEvents)
-        if (createModifyPattern) {
-            indicators.add("Rapid create-modify pattern detected (ransomware behavior)")
-            confidence += 0.3f
+        // Pattern 3: High entropy in modified files (encryption indicator) (INCREASED THRESHOLD)
+        val highEntropyFiles = recentModifications.filter { 
+            it.entropy != null && it.entropy > 7.8 // Increased from 7.5 to 7.8
+        }
+        // Increased threshold from 20 to 50 high entropy files
+        if (highEntropyFiles.size > 50) {
+            indicators.add("High entropy detected in ${highEntropyFiles.size} files (possible encryption)")
+            confidence += 0.6f
         }
         
-        // Pattern 5: Mass deletions
+        // Pattern 4: Rapid file creation followed by modification (STRICTER)
+        val createModifyPattern = detectCreateModifyPattern(recentEvents.filter { it.timestamp >= timeWindowStart })
+        if (createModifyPattern) {
+            indicators.add("Rapid create-modify pattern detected (ransomware behavior)")
+            confidence += 0.4f
+        }
+        
+        // Pattern 5: Mass deletions (INCREASED THRESHOLD)
         val deletions = recentEvents.filter { 
             it.eventType == EventType.DELETED && 
-            System.currentTimeMillis() - it.timestamp < timeWindowMs 
+            it.timestamp >= timeWindowStart
         }
-        if (deletions.size > 30) {
+        // Increased threshold from 30 to 50 deletions
+        if (deletions.size > 50) {
             indicators.add("Mass file deletions detected (${deletions.size} files)")
-            confidence += 0.2f
+            confidence += 0.3f
         }
         
         confidence = confidence.coerceIn(0.0f, 1.0f)
@@ -127,7 +135,31 @@ class BehaviorDetectionEngine(private val context: Context) {
         
         // Combine heuristic and ML confidence
         val combinedConfidence = (confidence * 0.6f + mlResult.confidence * 0.4f).coerceIn(0.0f, 1.0f)
-        val isSuspicious = confidence >= 0.3f || mlResult.isRansomware
+        
+        // Extract package name from events to check if it's a trusted app
+        val packageName = extractPackageNameFromEvents(recentEvents)
+        val isTrusted = packageName != null && trustedAppChecker.isTrustedApp(packageName)
+        
+        // Adjust confidence based on trust level
+        val adjustedConfidence = if (isTrusted) {
+            // Reduce confidence significantly for trusted apps (70% reduction)
+            // Only flag trusted apps if confidence is VERY high (0.8+)
+            combinedConfidence * 0.3f
+        } else {
+            combinedConfidence
+        }
+        
+        // INCREASED THRESHOLD: Only mark as suspicious if confidence is HIGH (0.5+) or ML says ransomware
+        // For trusted apps, require even higher confidence (0.8+) to prevent false positives
+        val threshold = if (isTrusted) 0.8f else 0.5f
+        val isSuspicious = adjustedConfidence >= threshold || 
+                          (mlResult.isRansomware && mlResult.confidence >= 0.7f && !isTrusted)
+        
+        // Log if we're filtering out a trusted app
+        if (isTrusted && combinedConfidence >= 0.5f && adjustedConfidence < threshold) {
+            android.util.Log.d("BehaviorDetectionEngine", 
+                "Filtered out trusted app $packageName (confidence: $combinedConfidence -> $adjustedConfidence)")
+        }
         
         val threatLevel = when {
             combinedConfidence >= 0.7f -> ThreatLevel.CRITICAL
@@ -142,7 +174,7 @@ class BehaviorDetectionEngine(private val context: Context) {
         
         return DetectionResult(
             suspicious = isSuspicious,
-            confidence = combinedConfidence,
+            confidence = adjustedConfidence,
             indicators = indicators,
             threatLevel = threatLevel
         )
@@ -179,6 +211,28 @@ class BehaviorDetectionEngine(private val context: Context) {
         }
     }
     
+    /**
+     * Extract package name from file events (if possible)
+     */
+    private fun extractPackageNameFromEvents(events: List<FileChangeEvent>): String? {
+        // Try to extract package name from file paths
+        // Common patterns: /data/data/com.package.name/, /storage/emulated/0/Android/data/com.package.name/
+        val paths = events.map { it.path }
+        val packagePattern = Regex("/(data/data|Android/data)/([^/]+)/")
+        
+        paths.forEach { path ->
+            val match = packagePattern.find(path)
+            if (match != null) {
+                val packageName = match.groupValues[2]
+                // Validate it looks like a package name
+                if (packageName.matches(Regex("^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_.]*$"))) {
+                    return packageName
+                }
+            }
+        }
+        return null
+    }
+    
     private fun detectExtensionChanges(events: List<FileChangeEvent>): Int {
         val renamedFiles = events.filter { it.eventType == EventType.RENAMED }
         // Simplified: count renames that might indicate extension changes
@@ -186,16 +240,13 @@ class BehaviorDetectionEngine(private val context: Context) {
     }
     
     private fun detectCreateModifyPattern(events: List<FileChangeEvent>): Boolean {
-        val recentWindow = events.filter { 
-            System.currentTimeMillis() - it.timestamp < timeWindowMs 
-        }
+        val creates = events.filter { it.eventType == EventType.CREATED }
+        val modifies = events.filter { it.eventType == EventType.MODIFIED }
         
-        val creates = recentWindow.filter { it.eventType == EventType.CREATED }
-        val modifies = recentWindow.filter { it.eventType == EventType.MODIFIED }
-        
-        // If many files are created and then quickly modified, it's suspicious
-        return creates.size > 20 && modifies.size > 20 && 
-               creates.size.toFloat() / modifies.size.toFloat() > 0.5f
+        // STRICTER: Check if many files were created and then modified quickly
+        // This is a strong ransomware indicator
+        // Increased thresholds: need at least 30 creates and 30 modifies, total 80+ events
+        return creates.size > 30 && modifies.size > 30 && creates.size + modifies.size > 80
     }
     
     /**

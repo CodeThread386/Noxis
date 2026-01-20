@@ -11,7 +11,7 @@ import com.security.guardian.data.entities.SnapshotMetadata
 
 @Database(
     entities = [ThreatEvent::class, SnapshotMetadata::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class RansomwareDatabase : RoomDatabase() {
@@ -29,7 +29,9 @@ abstract class RansomwareDatabase : RoomDatabase() {
                     context.applicationContext,
                     RansomwareDatabase::class.java,
                     "ransomware_database"
-                ).build()
+                )
+                .fallbackToDestructiveMigration() // For development - use proper migrations in production
+                .build()
                 INSTANCE = instance
                 instance
             }

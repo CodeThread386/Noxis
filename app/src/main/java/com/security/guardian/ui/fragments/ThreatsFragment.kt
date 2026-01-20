@@ -37,15 +37,27 @@ class ThreatsFragment : Fragment() {
         
         viewModel = ViewModelProvider(requireActivity())[RansomwareViewModel::class.java]
         
+        val emptyStateLayout = view.findViewById<android.widget.LinearLayout>(R.id.emptyStateLayout)
         recyclerView = view.findViewById(R.id.threatsRecyclerView)
+        
         recyclerView.layoutManager = LinearLayoutManager(requireContext())
         
-        try {
-            recyclerView = view.findViewById(R.id.threatsRecyclerView)
-            recyclerView.layoutManager = LinearLayoutManager(requireContext())
+        // Setup refresh button
+        view.findViewById<com.google.android.material.button.MaterialButton>(R.id.refreshThreatsButton)?.setOnClickListener {
+            android.widget.Toast.makeText(requireContext(), "Refreshing threats...", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        
+        viewModel.allThreats.observe(viewLifecycleOwner) { threats ->
+            val threatList = threats ?: emptyList()
             
-            viewModel.allThreats.observe(viewLifecycleOwner) { threats ->
-                recyclerView.adapter = ThreatAdapter(threats ?: emptyList()) { threat ->
+            if (threatList.isEmpty()) {
+                emptyStateLayout?.visibility = View.VISIBLE
+                recyclerView.visibility = View.GONE
+            } else {
+                emptyStateLayout?.visibility = View.GONE
+                recyclerView.visibility = View.VISIBLE
+                
+                recyclerView.adapter = ThreatAdapter(threatList) { threat ->
                     val intent = Intent(requireContext(), ThreatDetailActivity::class.java).apply {
                         putExtra("threat_id", threat.id)
                         putExtra("threat_type", threat.type ?: "")
@@ -56,8 +68,6 @@ class ThreatsFragment : Fragment() {
                     startActivity(intent)
                 }
             }
-        } catch (e: Exception) {
-            android.util.Log.e("ThreatsFragment", "Error setting up threats list", e)
         }
     }
 }

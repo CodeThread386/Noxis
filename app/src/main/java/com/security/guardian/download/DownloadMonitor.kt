@@ -9,8 +9,13 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
+import com.security.guardian.data.RansomwareDatabase
+import com.security.guardian.data.entities.ThreatEvent
 import com.security.guardian.detection.BehaviorDetectionEngine
+import com.security.guardian.notification.ThreatNotificationService
+import com.security.guardian.storage.SAFManager
 import kotlinx.coroutines.*
 import java.io.File
 
@@ -18,11 +23,16 @@ import java.io.File
  * Monitors DownloadManager queue and inspects downloaded files
  * Detects suspicious downloads before they execute
  */
-class DownloadMonitor(private val context: Context) {
+class DownloadMonitor(
+    private val context: Context,
+    private val database: RansomwareDatabase,
+    private val notificationService: ThreatNotificationService
+) {
     
     private val downloadManager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
     private val detectionEngine = BehaviorDetectionEngine(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val safManager = SAFManager(context)
     
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -235,19 +245,38 @@ class DownloadMonitor(private val context: Context) {
     }
     
     private fun handleSuspiciousFile(file: File, filename: String) {
-        // Quarantine file
+        // Quarantine file using SAF if available
         scope.launch {
-            quarantineFile(file)
-            notifyThreatDetected(
-                type = "SUSPICIOUS_DOWNLOAD",
-                description = "Suspicious file downloaded: $filename",
-                filePath = file.absolutePath
-            )
+            val quarantined = try {
+                if (safManager.hasSAFAccess("Downloads")) {
+                    // Use SAF for quarantine
+                    val fileUri = Uri.fromFile(file)
+                    val quarantineUri = safManager.quarantineFile(fileUri, filename)
+                    quarantineUri != null
+                } else {
+                    // Fallback to local quarantine
+                    quarantineFileLocal(file)
+                    true
+                }
+            } catch (e: Exception) {
+                Log.e("DownloadMonitor", "Error quarantining file", e)
+                // Fallback to local quarantine
+                quarantineFileLocal(file)
+                true
+            }
+            
+            if (quarantined) {
+                notifyThreatDetected(
+                    type = "SUSPICIOUS_DOWNLOAD",
+                    description = "Suspicious file downloaded and quarantined: $filename",
+                    filePath = file.absolutePath
+                )
+            }
         }
     }
     
-    private suspend fun quarantineFile(file: File) {
-        // Move to quarantine directory
+    private suspend fun quarantineFileLocal(file: File) {
+        // Move to quarantine directory (fallback)
         val quarantineDir = File(context.filesDir, "quarantine")
         quarantineDir.mkdirs()
         
@@ -257,12 +286,36 @@ class DownloadMonitor(private val context: Context) {
     }
     
     private fun notifySuspiciousDownload(uri: String, reason: String) {
-        // Send notification
-        // Implementation in notification service
+        scope.launch {
+            val threat = ThreatEvent(
+                type = "SUSPICIOUS_DOWNLOAD",
+                packageName = null,
+                description = "Suspicious download from: $uri - $reason",
+                severity = "HIGH",
+                confidence = 0.75f,
+                timestamp = System.currentTimeMillis(),
+                status = "DETECTED",
+                indicators = listOf(reason, uri).toString()
+            )
+            database.threatEventDao().insertThreat(threat)
+            notificationService.notifyThreat(threat)
+        }
     }
     
     private fun notifyThreatDetected(type: String, description: String, filePath: String) {
-        // Send threat notification
-        // Implementation in notification service
+        scope.launch {
+            val threat = ThreatEvent(
+                type = type,
+                packageName = null,
+                description = description,
+                severity = "HIGH",
+                confidence = 0.80f,
+                timestamp = System.currentTimeMillis(),
+                status = "DETECTED",
+                indicators = listOf(filePath).toString()
+            )
+            database.threatEventDao().insertThreat(threat)
+            notificationService.notifyThreat(threat)
+        }
     }
 }

@@ -6,14 +6,23 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.security.guardian.R
+import com.security.guardian.data.RansomwareDatabase
+import com.security.guardian.data.entities.ThreatEvent
 import com.security.guardian.detection.BehaviorDetectionEngine
 import com.security.guardian.network.HTTPSInspector
+import com.security.guardian.network.PIILeakTracker
+import com.security.guardian.notification.ThreatNotificationService
 import kotlinx.coroutines.*
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetSocketAddress
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import java.security.cert.X509Certificate
 
 /**
  * VPN Service for intercepting network traffic and blocking suspicious downloads
@@ -27,16 +36,23 @@ class VPNInterceptionService : VpnService() {
     private lateinit var detectionEngine: BehaviorDetectionEngine
     private lateinit var downloadBuffer: DownloadBuffer
     private lateinit var httpsInspector: HTTPSInspector
+    private lateinit var database: RansomwareDatabase
+    private lateinit var notificationService: ThreatNotificationService
+    private lateinit var piiLeakTracker: PIILeakTracker
     
     // Local threat intelligence cache
     private val maliciousDomains = mutableSetOf<String>()
     private val suspiciousDomains = mutableSetOf<String>()
+    private val blockedDomains = mutableMapOf<String, Long>() // domain -> timestamp
+    private val sniCache = mutableMapOf<String, HTTPSInspector.SNIResult>() // IP -> SNI result
     
     override fun onCreate() {
         super.onCreate()
         detectionEngine = BehaviorDetectionEngine(this)
         downloadBuffer = DownloadBuffer(this)
         httpsInspector = HTTPSInspector()
+        database = RansomwareDatabase.getDatabase(this)
+        notificationService = ThreatNotificationService(this)
         
         // Load threat intelligence cache
         loadThreatIntelligence()
@@ -108,14 +124,24 @@ class VPNInterceptionService : VpnService() {
                         // Try to extract SNI from TLS handshake
                         val sniResult = httpsInspector.extractSNI(buffer.sliceArray(0 until length))
                         if (sniResult.serverName != null) {
-                            if (shouldBlock(sniResult.serverName)) {
-                                Log.d(TAG, "Blocked connection to malicious domain: ${sniResult.serverName}")
-                                continue
-                            }
+                            val domain = sniResult.serverName
+                            
+                            // Cache SNI result
+                            val destIPString = ipHeader.destIP.joinToString(".")
+                            sniCache[destIPString] = sniResult
                             
                             // Check for SNI anomalies
                             if (sniResult.anomalies.isNotEmpty()) {
-                                Log.w(TAG, "SNI anomalies detected: ${sniResult.anomalies.joinToString()}")
+                                Log.w(TAG, "SNI anomalies detected for $domain: ${sniResult.anomalies.joinToString()}")
+                                serviceScope.launch {
+                                    handleSNIAnomaly(domain, sniResult)
+                                }
+                            }
+                            
+                            if (shouldBlock(domain)) {
+                                Log.d(TAG, "Blocked connection to malicious domain: $domain")
+                                blockedDomains[domain] = System.currentTimeMillis()
+                                continue
                             }
                         }
                         
@@ -125,6 +151,7 @@ class VPNInterceptionService : VpnService() {
                             if (shouldBlock(destination)) {
                                 // Drop packet (don't forward)
                                 Log.d(TAG, "Blocked connection to malicious domain: $destination")
+                                blockedDomains[destination] = System.currentTimeMillis()
                                 continue
                             }
                             
@@ -136,8 +163,21 @@ class VPNInterceptionService : VpnService() {
                                 val suspicious = downloadBuffer.inspect(destination)
                                 if (suspicious) {
                                     Log.w(TAG, "Suspicious download detected from: $destination")
+                                    serviceScope.launch {
+                                        handleSuspiciousDownload(destination)
+                                    }
                                     // Block by not forwarding packet
                                     continue
+                                }
+                                
+                                // Check content size patterns
+                                val contentSize = length.toLong()
+                                val suspiciousSize = httpsInspector.checkContentSizePattern(contentSize, null)
+                                if (suspiciousSize) {
+                                    Log.w(TAG, "Suspicious content size pattern from: $destination")
+                                    serviceScope.launch {
+                                        handleSuspiciousDownload(destination)
+                                    }
                                 }
                             }
                         }
@@ -193,6 +233,69 @@ class VPNInterceptionService : VpnService() {
     private fun isDownloadFlow(header: IPHeader): Boolean {
         // Check if this looks like a download (HTTP/HTTPS, large payload)
         return header.protocol == 6 || header.protocol == 17 // TCP or UDP
+    }
+    
+    private suspend fun handleSNIAnomaly(domain: String, sniResult: HTTPSInspector.SNIResult) {
+        try {
+            val threat = ThreatEvent(
+                type = "HTTPS_ANOMALY",
+                packageName = null,
+                description = "HTTPS anomaly detected for $domain: ${sniResult.anomalies.joinToString(", ")}",
+                severity = "MEDIUM",
+                confidence = 0.70f,
+                timestamp = System.currentTimeMillis(),
+                status = "DETECTED",
+                indicators = sniResult.anomalies.toString()
+            )
+            database.threatEventDao().insertThreat(threat)
+            notificationService.notifyThreat(threat)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling SNI anomaly", e)
+        }
+    }
+    
+    private suspend fun handleSuspiciousDownload(domain: String) {
+        try {
+            val threat = ThreatEvent(
+                type = "SUSPICIOUS_DOWNLOAD",
+                packageName = null,
+                description = "Suspicious download blocked from: $domain",
+                severity = "HIGH",
+                confidence = 0.80f,
+                timestamp = System.currentTimeMillis(),
+                status = "BLOCKED",
+                indicators = listOf(domain).toString()
+            )
+            database.threatEventDao().insertThreat(threat)
+            notificationService.notifyThreat(threat)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling suspicious download", e)
+        }
+    }
+    
+    fun getBlockedDomainsCount(): Int = blockedDomains.size
+    
+    fun getTopBlockedDomains(limit: Int = 10): List<String> {
+        return blockedDomains.entries
+            .sortedByDescending { it.value }
+            .take(limit)
+            .map { it.key }
+    }
+    
+    /**
+     * Update stats in SharedPreferences for UI access
+     */
+    private fun updateStats() {
+        try {
+            val prefs = getSharedPreferences("vpn_stats", android.content.Context.MODE_PRIVATE)
+            prefs.edit()
+                .putInt("blocked_domains_count", blockedDomains.size)
+                .putString("top_blocked_domains", getTopBlockedDomains(10).joinToString(","))
+                .putInt("trackers_blocked", blockedDomains.size) // Simplified
+                .apply()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating stats", e)
+        }
     }
     
     private fun loadThreatIntelligence() {

@@ -45,48 +45,120 @@ class RansomwareProtectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         
-        detectionEngine = BehaviorDetectionEngine(this)
-        mlClassifier = RansomwareClassifier(this)
-        fileSystemMonitor = FileSystemMonitor(this, detectionEngine)
-        downloadMonitor = DownloadMonitor(this)
-        packageMonitor = PackageMonitor(this)
-        usageStatsMonitor = UsageStatsMonitor(this)
-        notificationService = ThreatNotificationService(this)
-        database = RansomwareDatabase.getDatabase(this)
-        
-        createNotificationChannel()
+        try {
+            detectionEngine = BehaviorDetectionEngine(this)
+            database = RansomwareDatabase.getDatabase(this)
+            notificationService = ThreatNotificationService(this)
+            
+            // Initialize ML classifier (may fail if model not available)
+            try {
+                mlClassifier = RansomwareClassifier(this)
+            } catch (e: Exception) {
+                Log.w(TAG, "ML Classifier not available, continuing without it", e)
+                // Will use fallback heuristics
+            }
+            
+            fileSystemMonitor = FileSystemMonitor(this, detectionEngine, database, notificationService)
+            downloadMonitor = DownloadMonitor(this, database, notificationService)
+            
+            // Initialize package monitor (may fail on some devices)
+            try {
+                packageMonitor = PackageMonitor(this)
+            } catch (e: Exception) {
+                Log.w(TAG, "PackageMonitor initialization failed", e)
+                // Will skip package monitoring
+            }
+            
+            // Initialize usage stats monitor
+            try {
+                usageStatsMonitor = UsageStatsMonitor(this)
+            } catch (e: Exception) {
+                Log.w(TAG, "UsageStatsMonitor initialization failed", e)
+                // Will skip usage stats monitoring
+            }
+            
+            createNotificationChannel()
+            Log.d(TAG, "Service initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Critical error in service onCreate", e)
+            // Don't crash - try to continue with minimal functionality
+        }
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
-        
-        serviceScope.launch {
-            startProtection()
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+            
+            serviceScope.launch {
+                try {
+                    startProtection()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error starting protection modules", e)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onStartCommand", e)
+            // Try to show notification anyway
+            try {
+                startForeground(NOTIFICATION_ID, createNotification())
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to start foreground service", e2)
+            }
         }
         
         return START_STICKY
     }
     
     private suspend fun startProtection() {
-        // Start file system monitoring
-        fileSystemMonitor.startMonitoring()
-        
-        // Start download monitoring
-        downloadMonitor.startMonitoring()
-        
-        // Start package monitoring
-        packageMonitor.startMonitoring()
-        
-        // Start usage stats monitoring
-        if (hasUsageStatsPermission()) {
-            usageStatsMonitor.startMonitoring()
-            usageStatsMonitor.addAnomalyCallback { anomaly ->
-                serviceScope.launch {
-                    handleUsageAnomaly(anomaly)
-                }
+        try {
+            // Start file system monitoring
+            if (::fileSystemMonitor.isInitialized) {
+                fileSystemMonitor.startMonitoring()
+                Log.d(TAG, "File system monitoring started")
             }
-        } else {
-            Log.w(TAG, "UsageStats permission not granted")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start file system monitoring", e)
+        }
+        
+        try {
+            // Start download monitoring
+            if (::downloadMonitor.isInitialized) {
+                downloadMonitor.startMonitoring()
+                Log.d(TAG, "Download monitoring started")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start download monitoring", e)
+        }
+        
+        try {
+            // Start package monitoring
+            if (::packageMonitor.isInitialized) {
+                packageMonitor.startMonitoring()
+                Log.d(TAG, "Package monitoring started")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start package monitoring", e)
+        }
+        
+        try {
+            // Start usage stats monitoring
+            if (::usageStatsMonitor.isInitialized && hasUsageStatsPermission()) {
+                usageStatsMonitor.startMonitoring()
+                usageStatsMonitor.addAnomalyCallback { anomaly ->
+                    serviceScope.launch {
+                        try {
+                            handleUsageAnomaly(anomaly)
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Error handling usage anomaly", e)
+                        }
+                    }
+                }
+                Log.d(TAG, "Usage stats monitoring started")
+            } else {
+                Log.w(TAG, "UsageStats permission not granted or monitor not initialized")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start usage stats monitoring", e)
         }
         
         // Start VPN service (user must grant permission separately)
@@ -155,11 +227,46 @@ class RansomwareProtectionService : Service() {
     
     override fun onDestroy() {
         super.onDestroy()
-        fileSystemMonitor.stopMonitoring()
-        downloadMonitor.stopMonitoring()
-        packageMonitor.stopMonitoring()
-        usageStatsMonitor.stopMonitoring()
-        mlClassifier.cleanup()
+        try {
+            if (::fileSystemMonitor.isInitialized) {
+                fileSystemMonitor.stopMonitoring()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping file system monitor", e)
+        }
+        
+        try {
+            if (::downloadMonitor.isInitialized) {
+                downloadMonitor.stopMonitoring()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping download monitor", e)
+        }
+        
+        try {
+            if (::packageMonitor.isInitialized) {
+                packageMonitor.stopMonitoring()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping package monitor", e)
+        }
+        
+        try {
+            if (::usageStatsMonitor.isInitialized) {
+                usageStatsMonitor.stopMonitoring()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping usage stats monitor", e)
+        }
+        
+        try {
+            if (::mlClassifier.isInitialized) {
+                mlClassifier.cleanup()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error cleaning up ML classifier", e)
+        }
+        
         serviceScope.cancel()
     }
     

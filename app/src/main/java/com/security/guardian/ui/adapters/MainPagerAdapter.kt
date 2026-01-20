@@ -5,7 +5,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.viewpager2.adapter.FragmentStateAdapter
 import com.security.guardian.ui.fragments.DashboardFragment
 import com.security.guardian.ui.fragments.ThreatsFragment
-import com.security.guardian.ui.fragments.RecoveryFragment
+import com.security.guardian.ui.fragments.ProtectionControlsFragment
 import com.security.guardian.ui.fragments.SettingsFragment
 
 class MainPagerAdapter(activity: FragmentActivity) : FragmentStateAdapter(activity) {
@@ -16,7 +16,7 @@ class MainPagerAdapter(activity: FragmentActivity) : FragmentStateAdapter(activi
         return when (position) {
             0 -> DashboardFragment()
             1 -> ThreatsFragment()
-            2 -> RecoveryFragment()
+            2 -> ProtectionControlsFragment()
             3 -> SettingsFragment()
             else -> DashboardFragment()
         }

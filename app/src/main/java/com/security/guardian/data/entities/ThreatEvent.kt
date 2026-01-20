@@ -2,8 +2,11 @@ package com.security.guardian.data.entities
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
+import androidx.room.TypeConverters
+import com.security.guardian.data.converters.ThreatEvidenceConverter
 
 @Entity(tableName = "threat_events")
+@TypeConverters(ThreatEvidenceConverter::class)
 data class ThreatEvent(
     @PrimaryKey(autoGenerate = true)
     val id: Long = 0,
@@ -14,5 +17,6 @@ data class ThreatEvent(
     val confidence: Float, // 0.0 to 1.0
     val timestamp: Long,
     val status: String, // DETECTED, RESOLVED, QUARANTINED
-    val indicators: String? // JSON array of indicators
+    val indicators: String?, // JSON array of indicators
+    val evidence: ThreatEvidence? = null // Structured evidence data
 )

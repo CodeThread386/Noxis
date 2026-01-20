@@ -1,10 +1,38 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- Primary Colors - Clean Blue -->
+    <color name="primary_blue">#2563EB</color>
+    <color name="primary_blue_light">#3B82F6</color>
+    <color name="primary_blue_dark">#1E40AF</color>
+    
+    <!-- Accent Colors -->
+    <color name="accent_green">#10B981</color>
+    <color name="accent_green_light">#34D399</color>
+    
+    <!-- Threat Colors - Subtle -->
+    <color name="critical_red">#EF4444</color>
+    <color name="high_orange">#F59E0B</color>
+    <color name="medium_yellow">#EAB308</color>
+    <color name="low_blue">#3B82F6</color>
+    <color name="safe_green">#10B981</color>
+    
+    <!-- Background Colors - Clean Light Theme -->
+    <color name="bg_primary">#FFFFFF</color>
+    <color name="bg_secondary">#F9FAFB</color>
+    <color name="bg_card">#FFFFFF</color>
+    <color name="bg_card_hover">#F3F4F6</color>
+    
+    <!-- Text Colors -->
+    <color name="text_primary">#111827</color>
+    <color name="text_secondary">#6B7280</color>
+    <color name="text_hint">#9CA3AF</color>
+    
+    <!-- Border Colors -->
+    <color name="border_light">#E5E7EB</color>
+    <color name="border_medium">#D1D5DB</color>
+    
+    <!-- Status Colors -->
+    <color name="status_protected">#10B981</color>
+    <color name="status_warning">#F59E0B</color>
+    <color name="status_critical">#EF4444</color>
 </resources>

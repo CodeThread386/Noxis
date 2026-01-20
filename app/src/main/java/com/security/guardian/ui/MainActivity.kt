@@ -1,5 +1,6 @@
 package com.security.guardian.ui
 
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
@@ -30,6 +31,13 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         try {
+            // Check if this is first launch and show permission request
+            if (PermissionRequestActivity.shouldShow(this)) {
+                startActivity(Intent(this, PermissionRequestActivity::class.java))
+                finish()
+                return
+            }
+            
             setContentView(R.layout.activity_main)
             
             viewModel = ViewModelProvider(this)[RansomwareViewModel::class.java]
@@ -56,17 +64,56 @@ class MainActivity : AppCompatActivity() {
                 tab.text = when (position) {
                     0 -> "Dashboard"
                     1 -> "Threats"
-                    2 -> "Recovery"
+                    2 -> "Protection"
                     3 -> "Settings"
                     else -> ""
                 }
             }.attach()
+            
+            // Update status banner
+            updateStatusBanner()
         } catch (e: Exception) {
             android.util.Log.e("MainActivity", "Error in setupUI", e)
         }
     }
     
-    private fun checkPermissions() {
+    private fun updateStatusBanner() {
+        viewModel.activeThreats.observe(this) { threats ->
+            val statusTitle = findViewById<android.widget.TextView>(R.id.statusTitle)
+            val statusSubtitle = findViewById<android.widget.TextView>(R.id.statusSubtitle)
+            val statusIndicator = findViewById<android.view.View>(R.id.statusIndicator)
+            
+            if (statusTitle != null && statusSubtitle != null && statusIndicator != null) {
+                val hasCritical = threats?.any { it.severity == "CRITICAL" } == true
+                val hasHigh = threats?.any { it.severity == "HIGH" } == true
+                
+                when {
+                    hasCritical -> {
+                        statusTitle.text = "Critical Threat"
+                        statusSubtitle.text = "Immediate action required"
+                        statusIndicator.setBackgroundColor(getColor(R.color.critical_red))
+                    }
+                    hasHigh -> {
+                        statusTitle.text = "High Threat"
+                        statusSubtitle.text = "Threat detected - review now"
+                        statusIndicator.setBackgroundColor(getColor(R.color.high_orange))
+                    }
+                    threats?.isNotEmpty() == true -> {
+                        statusTitle.text = "Warning"
+                        statusSubtitle.text = "${threats.size} threat(s) detected"
+                        statusIndicator.setBackgroundColor(getColor(R.color.medium_yellow))
+                    }
+                    else -> {
+                        statusTitle.text = "Protected"
+                        statusSubtitle.text = "All systems operational"
+                        statusIndicator.setBackgroundColor(getColor(R.color.accent_green))
+                    }
+                }
+            }
+        }
+    }
+    
+    fun checkPermissions() {
         // Check VPN permission
         val vpnIntent = VpnService.prepare(this)
         if (vpnIntent != null) {
