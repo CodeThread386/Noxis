@@ -1,5 +1,6 @@
 # Security Guardian (Noxis) — Behavior-Based Ransomware Early Warning for Android
 
+
 Defense-in-depth prototype focused on non-root behavior detection, network interception, and rapid response.
 
 ## Key capabilities (implemented)
