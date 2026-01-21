@@ -90,10 +90,12 @@ class DashboardFragment : Fragment() {
                 }
                 appsMonitoredText.text = "$userAppsCount"
                 
-                // Trackers blocked - get from VPN service stats
+                // Trackers/Ads blocked - get from VPN service stats (includes ads)
                 val vpnPrefs = context.getSharedPreferences("vpn_stats", Context.MODE_PRIVATE)
                 val trackersBlocked = vpnPrefs.getInt("trackers_blocked", 0)
-                trackersBlockedText.text = "$trackersBlocked"
+                val adsBlocked = vpnPrefs.getInt("ads_blocked_count", 0)
+                val totalBlocked = trackersBlocked + adsBlocked
+                trackersBlockedText.text = "$totalBlocked"
                 
                 // Permissions blocked - get from permission blocker stats
                 val permPrefs = context.getSharedPreferences("permission_stats", Context.MODE_PRIVATE)

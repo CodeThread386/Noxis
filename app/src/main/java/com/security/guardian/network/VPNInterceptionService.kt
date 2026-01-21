@@ -39,12 +39,15 @@ class VPNInterceptionService : VpnService() {
     private lateinit var database: RansomwareDatabase
     private lateinit var notificationService: ThreatNotificationService
     private lateinit var piiLeakTracker: PIILeakTracker
+    private lateinit var adBlocker: AdBlocker
+    private lateinit var httpInterceptor: HTTPInterceptor
     
     // Local threat intelligence cache
     private val maliciousDomains = mutableSetOf<String>()
     private val suspiciousDomains = mutableSetOf<String>()
     private val blockedDomains = mutableMapOf<String, Long>() // domain -> timestamp
     private val sniCache = mutableMapOf<String, HTTPSInspector.SNIResult>() // IP -> SNI result
+    private val adsBlocked = mutableMapOf<String, Long>() // ad domain -> timestamp
     
     override fun onCreate() {
         super.onCreate()
@@ -53,9 +56,18 @@ class VPNInterceptionService : VpnService() {
         httpsInspector = HTTPSInspector()
         database = RansomwareDatabase.getDatabase(this)
         notificationService = ThreatNotificationService(this)
+        adBlocker = AdBlocker(this)
+        httpInterceptor = HTTPInterceptor()
         
         // Load threat intelligence cache
         loadThreatIntelligence()
+        
+        // Update ad block lists if needed (in background)
+        serviceScope.launch {
+            if (adBlocker.isUpdateNeeded()) {
+                adBlocker.updateAdBlockLists()
+            }
+        }
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -121,7 +133,65 @@ class VPNInterceptionService : VpnService() {
                     // Parse IP packet
                     val ipHeader = parseIPHeader(packet)
                     if (ipHeader != null) {
-                        // Try to extract SNI from TLS handshake
+                        var shouldBlock = false
+                        var blockReason = ""
+                        
+                        // Method 1: Extract HTTP request (for HTTP traffic) - CRITICAL for YouTube ads
+                        val httpRequest = httpInterceptor.extractHTTPRequest(buffer.sliceArray(0 until length), length)
+                        if (httpRequest != null) {
+                            val domain = httpRequest.host
+                            val fullUrl = httpRequest.fullUrl
+                            val path = httpRequest.path
+                            
+                            Log.d(TAG, "HTTP Request: $domain$path")
+                            
+                            // Check domain blocking first
+                            if (adBlocker.shouldBlock(domain)) {
+                                shouldBlock = true
+                                blockReason = "Ad domain: $domain"
+                            }
+                            
+                            // Check YouTube ad URL patterns (MOST IMPORTANT for YouTube)
+                            // Check full URL, path, and domain
+                            if (!shouldBlock) {
+                                if (adBlocker.isYouTubeAd(fullUrl) || 
+                                    adBlocker.isYouTubeAd(path) ||
+                                    adBlocker.isYouTubeAd("$domain$path")) {
+                                    shouldBlock = true
+                                    blockReason = "YouTube ad URL detected: $fullUrl"
+                                }
+                            }
+                            
+                            // Special check for YouTube/Google domains
+                            if (!shouldBlock && (domain.contains("youtube") || domain.contains("googlevideo") || 
+                                domain.contains("doubleclick") || domain.contains("googleadservices"))) {
+                                // Check path for ad patterns
+                                if (adBlocker.isYouTubeAd(path) || adBlocker.isYouTubeAd(fullUrl)) {
+                                    shouldBlock = true
+                                    blockReason = "YouTube ad detected in $domain: $path"
+                                }
+                            }
+                            
+                            if (shouldBlock) {
+                                Log.w(TAG, "🚫 BLOCKED HTTP: $blockReason")
+                                adsBlocked[domain] = System.currentTimeMillis()
+                                blockedDomains[domain] = System.currentTimeMillis()
+                                updateAdBlockStats()
+                                continue // Drop packet
+                            }
+                        }
+                        
+                        // Method 2: Extract DNS query (for DNS traffic)
+                        val dnsDomain = httpInterceptor.extractDNSQuery(buffer.sliceArray(0 until length), length)
+                        if (dnsDomain != null && adBlocker.shouldBlock(dnsDomain)) {
+                            Log.w(TAG, "🚫 BLOCKED DNS: $dnsDomain")
+                            adsBlocked[dnsDomain] = System.currentTimeMillis()
+                            blockedDomains[dnsDomain] = System.currentTimeMillis()
+                            updateAdBlockStats()
+                            continue // Drop DNS query
+                        }
+                        
+                        // Method 3: Extract SNI from TLS handshake (for HTTPS traffic) - CRITICAL for YouTube
                         val sniResult = httpsInspector.extractSNI(buffer.sliceArray(0 until length))
                         if (sniResult.serverName != null) {
                             val domain = sniResult.serverName
@@ -129,6 +199,8 @@ class VPNInterceptionService : VpnService() {
                             // Cache SNI result
                             val destIPString = ipHeader.destIP.joinToString(".")
                             sniCache[destIPString] = sniResult
+                            
+                            Log.d(TAG, "SNI Domain: $domain")
                             
                             // Check for SNI anomalies
                             if (sniResult.anomalies.isNotEmpty()) {
@@ -138,17 +210,74 @@ class VPNInterceptionService : VpnService() {
                                 }
                             }
                             
-                            if (shouldBlock(domain)) {
+                            // Universal Ad Blocker - Check if this is an ad domain
+                            if (adBlocker.shouldBlock(domain)) {
+                                Log.w(TAG, "🚫 BLOCKED AD (SNI): $domain")
+                                adsBlocked[domain] = System.currentTimeMillis()
+                                blockedDomains[domain] = System.currentTimeMillis()
+                                updateAdBlockStats()
+                                continue // Drop packet - don't forward
+                            }
+                            
+                            // Special YouTube ad blocking - block known ad domains immediately
+                            if (domain.contains("doubleclick") || 
+                                domain.contains("googleadservices") ||
+                                domain.contains("googlesyndication") ||
+                                domain.contains("adservice.google") ||
+                                domain.contains("pagead2.googlesyndication") ||
+                                domain.contains("tpc.googlesyndication")) {
+                                Log.w(TAG, "🚫 BLOCKED YouTube Ad Domain (SNI): $domain")
+                                adsBlocked[domain] = System.currentTimeMillis()
+                                blockedDomains[domain] = System.currentTimeMillis()
+                                updateAdBlockStats()
+                                continue
+                            }
+                            
+                            // For YouTube/Google domains, be more aggressive
+                            if (domain.contains("youtube") || domain.contains("googlevideo")) {
+                                // Try to extract URL from packet data (might contain ad parameters)
+                                val packetData = try {
+                                    String(buffer.sliceArray(0 until length.coerceAtMost(1024)), Charsets.UTF_8)
+                                } catch (e: Exception) {
+                                    ""
+                                }
+                                
+                                // Check for ad-related strings in packet
+                                if (adBlocker.isYouTubeAd(packetData) || 
+                                    packetData.contains("adformat") ||
+                                    packetData.contains("ad_type") ||
+                                    packetData.contains("/ptracking") ||
+                                    packetData.contains("/pagead")) {
+                                    Log.w(TAG, "🚫 BLOCKED YouTube Ad (SNI + packet data): $domain")
+                                    adsBlocked[domain] = System.currentTimeMillis()
+                                    blockedDomains[domain] = System.currentTimeMillis()
+                                    updateAdBlockStats()
+                                    continue
+                                }
+                            }
+                            
+                            // Check for malicious domains (existing logic)
+                            if (shouldBlockMalicious(domain)) {
                                 Log.d(TAG, "Blocked connection to malicious domain: $domain")
                                 blockedDomains[domain] = System.currentTimeMillis()
                                 continue
                             }
                         }
                         
-                        // Check destination domain (fallback)
+                        // Method 4: Check destination domain (fallback)
                         val destination = getDestinationFromPacket(ipHeader)
                         if (destination != null) {
-                            if (shouldBlock(destination)) {
+                            // Universal Ad Blocker - Check if this is an ad domain
+                            if (adBlocker.shouldBlock(destination)) {
+                                Log.w(TAG, "🚫 BLOCKED AD (IP): $destination")
+                                adsBlocked[destination] = System.currentTimeMillis()
+                                blockedDomains[destination] = System.currentTimeMillis()
+                                updateAdBlockStats()
+                                continue // Drop packet - don't forward
+                            }
+                            
+                            // Check for malicious domains (existing logic)
+                            if (shouldBlockMalicious(destination)) {
                                 // Drop packet (don't forward)
                                 Log.d(TAG, "Blocked connection to malicious domain: $destination")
                                 blockedDomains[destination] = System.currentTimeMillis()
@@ -183,7 +312,7 @@ class VPNInterceptionService : VpnService() {
                         }
                     }
                     
-                    // Forward packet
+                    // Forward packet (only if not blocked)
                     vpnOutput.write(buffer, 0, length)
                 }
             } catch (e: Exception) {
@@ -224,7 +353,7 @@ class VPNInterceptionService : VpnService() {
         return null
     }
     
-    private fun shouldBlock(destination: String?): Boolean {
+    private fun shouldBlockMalicious(destination: String?): Boolean {
         if (destination == null) return false
         return maliciousDomains.contains(destination) || 
                suspiciousDomains.contains(destination)
@@ -296,6 +425,41 @@ class VPNInterceptionService : VpnService() {
         } catch (e: Exception) {
             Log.e(TAG, "Error updating stats", e)
         }
+    }
+    
+    /**
+     * Update ad block statistics
+     */
+    private fun updateAdBlockStats() {
+        try {
+            val prefs = getSharedPreferences("vpn_stats", android.content.Context.MODE_PRIVATE)
+            val adBlockerStats = adBlocker.getStats()
+            
+            // Update stats periodically (not on every block to reduce overhead)
+            val lastUpdate = prefs.getLong("ad_block_stats_last_update", 0)
+            val now = System.currentTimeMillis()
+            if (now - lastUpdate > 5000) { // Update every 5 seconds
+                prefs.edit()
+                    .putInt("ads_blocked_count", adsBlocked.size)
+                    .putInt("ad_blocker_total_domains", adBlockerStats.totalBlockedDomains)
+                    .putBoolean("ad_blocker_enabled", adBlockerStats.isEnabled)
+                    .putString("top_blocked_ads", getTopBlockedAds(10).joinToString(","))
+                    .putLong("ad_block_stats_last_update", now)
+                    .apply()
+                
+                // Also update general stats
+                updateStats()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating ad block stats", e)
+        }
+    }
+    
+    private fun getTopBlockedAds(limit: Int = 10): List<String> {
+        return adsBlocked.entries
+            .sortedByDescending { it.value }
+            .take(limit)
+            .map { it.key }
     }
     
     private fun loadThreatIntelligence() {

@@ -66,8 +66,14 @@ class NetworkInsightsFragment : Fragment() {
                     val topDomains = getTopBlockedDomains(10)
                     val piiLeaks = piiLeakTracker?.getAllLeaks() ?: emptyList()
                     
+                    // Get ad blocker stats
+                    val adBlocker = com.security.guardian.network.AdBlocker(requireContext())
+                    val adBlockerStats = adBlocker.getStats()
+                    val adsBlocked = getAdsBlockedCount()
+                    val topBlockedAds = getTopBlockedAds(10)
+                    
                     withContext(Dispatchers.Main) {
-                        updateUI(blockedCount, topDomains, piiLeaks)
+                        updateUI(blockedCount, topDomains, piiLeaks, adBlockerStats, adsBlocked, topBlockedAds)
                     }
                 } catch (e: Exception) {
                     android.util.Log.e("NetworkInsights", "Error loading network insights", e)
@@ -76,9 +82,16 @@ class NetworkInsightsFragment : Fragment() {
         }
     }
     
-    private fun updateUI(blockedCount: Int, topDomains: List<String>, piiLeaks: List<PIILeakTracker.PIILeak>) {
+    private fun updateUI(
+        blockedCount: Int, 
+        topDomains: List<String>, 
+        piiLeaks: List<PIILeakTracker.PIILeak>,
+        adBlockerStats: com.security.guardian.network.AdBlocker.AdBlockerStats,
+        adsBlocked: Int,
+        topBlockedAds: List<String>
+    ) {
         // Update blocked domains count
-        blockedDomainsCountText.text = "Blocked Domains: $blockedCount"
+        blockedDomainsCountText.text = "Blocked Domains: $blockedCount\n(Includes ads and malicious domains)"
         
         // Update top blocked domains
         if (topDomains.isNotEmpty()) {
@@ -107,6 +120,20 @@ class NetworkInsightsFragment : Fragment() {
         } else {
             piiLeaksText.text = "No PII leaks detected"
         }
+        
+        // Add ad blocker info to blocked domains text if available
+        val adBlockerInfo = if (adsBlocked > 0) {
+            "\nAds Blocked: $adsBlocked (${adBlockerStats.totalBlockedDomains} domains)"
+        } else {
+            ""
+        }
+        blockedDomainsCountText.text = "Blocked Domains: $blockedCount$adBlockerInfo"
+        
+        // Add top blocked ads to domains list if available
+        if (topBlockedAds.isNotEmpty() && topDomains.isEmpty()) {
+            val adsText = topBlockedAds.joinToString("\n") { "• $it (ad)" }
+            topBlockedDomainsText.text = "Top Blocked Ads:\n$adsText"
+        }
     }
     
     private fun getBlockedDomainsCount(): Int {
@@ -128,6 +155,29 @@ class NetworkInsightsFragment : Fragment() {
                 emptyList()
             } else {
                 domainsString.split(",").take(limit)
+            }
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+    
+    private fun getAdsBlockedCount(): Int {
+        return try {
+            val prefs = requireContext().getSharedPreferences("vpn_stats", Context.MODE_PRIVATE)
+            prefs.getInt("ads_blocked_count", 0)
+        } catch (e: Exception) {
+            0
+        }
+    }
+    
+    private fun getTopBlockedAds(limit: Int): List<String> {
+        return try {
+            val prefs = requireContext().getSharedPreferences("vpn_stats", Context.MODE_PRIVATE)
+            val adsString = prefs.getString("top_blocked_ads", "")
+            if (adsString.isNullOrEmpty()) {
+                emptyList()
+            } else {
+                adsString.split(",").take(limit)
             }
         } catch (e: Exception) {
             emptyList()

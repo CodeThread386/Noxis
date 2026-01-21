@@ -14,6 +14,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.security.guardian.data.RansomwareDatabase
 import com.security.guardian.data.entities.ThreatEvent
 import com.security.guardian.detection.BehaviorDetectionEngine
+import com.security.guardian.filesystem.FileTracker
 import com.security.guardian.notification.ThreatNotificationService
 import com.security.guardian.storage.SAFManager
 import kotlinx.coroutines.*
@@ -33,6 +34,11 @@ class DownloadMonitor(
     private val detectionEngine = BehaviorDetectionEngine(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val safManager = SAFManager(context)
+    private lateinit var fileTracker: FileTracker
+    
+    fun initialize(fileTracker: FileTracker) {
+        this.fileTracker = fileTracker
+    }
     
     private val downloadReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -55,8 +61,47 @@ class DownloadMonitor(
         scope.launch {
             while (isActive) {
                 monitorActiveDownloads()
+                
+                // Also check for completed downloads that might have been missed
+                checkCompletedDownloads()
+                
                 delay(5000) // Check every 5 seconds
             }
+        }
+    }
+    
+    /**
+     * Check all completed downloads and track them
+     */
+    private suspend fun checkCompletedDownloads() = withContext(Dispatchers.IO) {
+        try {
+            val query = DownloadManager.Query()
+            query.setFilterByStatus(DownloadManager.STATUS_SUCCESSFUL)
+            
+            val cursor: Cursor = downloadManager.query(query)
+            while (cursor.moveToNext()) {
+                val downloadId = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
+                val uriString = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
+                val sourceUri = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI))
+                
+                if (uriString != null) {
+                    val uri = Uri.parse(uriString)
+                    val file = getFileFromUri(uri)
+                    
+                    if (file != null && file.exists() && ::fileTracker.isInitialized) {
+                        // Track file if not already tracked
+                        val sourceDomain = try {
+                            Uri.parse(sourceUri).host
+                        } catch (e: Exception) {
+                            null
+                        }
+                        fileTracker.trackDownloadedFile(file, sourceDomain)
+                    }
+                }
+            }
+            cursor.close()
+        } catch (e: Exception) {
+            Log.e("DownloadMonitor", "Error checking completed downloads", e)
         }
     }
     
@@ -99,12 +144,24 @@ class DownloadMonitor(
             val uriString = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI))
             val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_MEDIA_TYPE))
             val title = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TITLE))
+            val sourceUri = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_URI))
             
             if (uriString != null) {
                 val uri = Uri.parse(uriString)
                 val file = getFileFromUri(uri)
                 
                 if (file != null && file.exists()) {
+                    // Track ALL downloaded files for ransomware scanning
+                    if (::fileTracker.isInitialized) {
+                        val sourceDomain = try {
+                            Uri.parse(sourceUri).host
+                        } catch (e: Exception) {
+                            null
+                        }
+                        fileTracker.trackDownloadedFile(file, sourceDomain)
+                    }
+                    
+                    // Also do immediate analysis
                     val suspicious = analyzeDownloadedFile(file, title)
                     if (suspicious) {
                         handleSuspiciousFile(file, title)

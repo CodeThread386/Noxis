@@ -129,7 +129,7 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Trackers Blocked"
+                        android:text="Ads &amp; Trackers Blocked"
                         android:textColor="@color/text_secondary"
                         android:textSize="13sp"
                         android:layout_marginBottom="8dp" />

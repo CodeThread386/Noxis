@@ -149,6 +149,9 @@ class MainActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_VPN && resultCode == RESULT_OK) {
             startVPNService()
+            android.widget.Toast.makeText(this, "✅ VPN started - Ad blocker is now active!", android.widget.Toast.LENGTH_LONG).show()
+        } else if (requestCode == REQUEST_VPN && resultCode != RESULT_OK) {
+            android.widget.Toast.makeText(this, "⚠️ VPN permission denied - Ad blocker cannot work without VPN", android.widget.Toast.LENGTH_LONG).show()
         }
     }
     

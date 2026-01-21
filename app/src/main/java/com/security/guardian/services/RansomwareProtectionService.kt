@@ -17,6 +17,7 @@ import com.security.guardian.data.entities.ThreatEvent
 import com.security.guardian.detection.BehaviorDetectionEngine
 import com.security.guardian.download.DownloadMonitor
 import com.security.guardian.filesystem.FileSystemMonitor
+import com.security.guardian.filesystem.FileTracker
 import com.security.guardian.ml.RansomwareClassifier
 import com.security.guardian.monitoring.UsageStatsMonitor
 import com.security.guardian.network.VPNInterceptionService
@@ -41,6 +42,7 @@ class RansomwareProtectionService : Service() {
     private lateinit var usageStatsMonitor: UsageStatsMonitor
     private lateinit var notificationService: ThreatNotificationService
     private lateinit var database: RansomwareDatabase
+    private lateinit var fileTracker: FileTracker
     
     override fun onCreate() {
         super.onCreate()
@@ -59,7 +61,9 @@ class RansomwareProtectionService : Service() {
             }
             
             fileSystemMonitor = FileSystemMonitor(this, detectionEngine, database, notificationService)
+            fileTracker = FileTracker(this, database, detectionEngine, notificationService)
             downloadMonitor = DownloadMonitor(this, database, notificationService)
+            downloadMonitor.initialize(fileTracker)
             
             // Initialize package monitor (may fail on some devices)
             try {
@@ -128,6 +132,17 @@ class RansomwareProtectionService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start download monitoring", e)
+        }
+        
+        try {
+            // Start file tracking and periodic scanning
+            if (::fileTracker.isInitialized) {
+                // Start periodic scanning every hour
+                fileTracker.startPeriodicScanning(intervalMinutes = 60)
+                Log.d(TAG, "File tracking and periodic scanning started")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start file tracking", e)
         }
         
         try {
