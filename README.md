@@ -3,7 +3,7 @@
 Defense-in-depth prototype focused on non-root behavior detection, network interception, and rapid response.
 
 ## Key capabilities (implemented)
-- **Network interception (VpnService, Kotlin)**: SNI/DNS/HTTP-level ad/tracker/malicious domain blocking; YouTube-focused ad filtering; PII leak regex detection; download buffering with size/entropy heuristics.
+- **Network interception (VpnService, Kotlin)**: SNI/DNS/HTTP-level ad/tracker/malicious domain blocking; PII leak regex detection; download buffering with size/entropy heuristics.
 - **Download monitoring (DownloadManager, Kotlin)**: Tracks all downloads, inspects file magic/entropy/ransom-note patterns/filenames, quarantines suspicious files (SAF when available, local fallback).
 - **File system surveillance (FileObserver, Kotlin)**: Monitors shared/public folders; entropy sampling on modifications; honeypot files as tripwires; snapshots via SAF/local before risky writes.
 - **Behavior-based ransomware detection (Kotlin + TensorFlow Lite)**: Heuristics for mass modifications, extension bursts, high-entropy writes, mass deletes, rapid create→modify; ML classifier for confidence scoring; trusted-app whitelisting to reduce false positives.
